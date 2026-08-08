@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Notebook / test cache
+.ipynb_checkpoints/
+.pytest_cache/
+
+# Raw data (원본 데이터, Git 제외)
+data/raw/*
+!data/raw/.gitkeep
+
+# Env / secrets
+.env
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
