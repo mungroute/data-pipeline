@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 *.egg-info/
 .eggs/
+*.pyc
 
 # Virtual env
 .venv/
@@ -16,7 +17,12 @@ env/
 
 # Raw data (원본 데이터, Git 제외)
 data/raw/*
+data/interim/*
+data/processed/*
+
 !data/raw/.gitkeep
+!data/interim/.gitkeep
+!data/processed/.gitkeep
 
 # Env / secrets
 .env
@@ -25,3 +31,14 @@ data/raw/*
 .DS_Store
 .idea/
 .vscode/
+
+
+*.tif
+*.tiff
+*.gpkg
+*.shp
+*.shx
+*.dbf
+
+# Generated QA CSV outputs
+reports/*_candidates.csv
