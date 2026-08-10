@@ -39,3 +39,6 @@ data/processed/*
 *.shp
 *.shx
 *.dbf
+
+# Generated QA CSV outputs
+reports/*_candidates.csv
