@@ -2,7 +2,10 @@ from collections import Counter
 from pathlib import Path
 
 import geopandas as gpd
+import numpy as np
 import pandas as pd
+from scipy.spatial import cKDTree
+from shapely.geometry import LineString
 
 
 # prepare_network.py가 있는 src 폴더의 상위 폴더(data-pipeline)를 기준으로
@@ -17,6 +20,10 @@ RAW_NETWORK_PATH = (
 )
 INTERIM_NETWORK_DIR = PIPELINE_ROOT / "data" / "interim" / "network"
 INTERIM_NETWORK_PATH = INTERIM_NETWORK_DIR / "junggu_walk_network_5186.gpkg"
+PROCESSED_NETWORK_DIR = PIPELINE_ROOT / "data" / "processed" / "network"
+SNAPPED_NETWORK_PATH = (
+    PROCESSED_NETWORK_DIR / "junggu_walk_network_snapped.gpkg"
+)
 
 # 이후 전처리에 반드시 필요한 원본 CSV 컬럼이다.
 REQUIRED_COLUMNS = {
@@ -275,6 +282,246 @@ def build_walkable_links(junggu_rows: pd.DataFrame) -> gpd.GeoDataFrame:
     return links
 
 
+def extract_link_endpoints(
+    links: gpd.GeoDataFrame,
+) -> pd.DataFrame:
+    """
+    각 LINK의 시작점과 끝점을 추출해 endpoint 테이블을 만든다.
+
+    원본 NODE ID는 topology 구성에 사용하지 않고, EPSG:5186으로
+    변환된 실제 LineString의 양 끝 좌표를 사용한다.
+    """
+
+    endpoint_rows = []
+
+    for link_index, link in links.iterrows():
+        coordinates = list(link.geometry.coords)
+
+        start_x, start_y = coordinates[0]
+        end_x, end_y = coordinates[-1]
+
+        endpoint_rows.append(
+            {
+                "link_index": link_index,
+                "original_link_id": link["original_link_id"],
+                "endpoint_type": "start",
+                "x": start_x,
+                "y": start_y,
+            }
+        )
+
+        endpoint_rows.append(
+            {
+                "link_index": link_index,
+                "original_link_id": link["original_link_id"],
+                "endpoint_type": "end",
+                "x": end_x,
+                "y": end_y,
+            }
+        )
+
+    endpoints = pd.DataFrame(endpoint_rows)
+
+    expected_count = len(links) * 2
+    if len(endpoints) != expected_count:
+        raise ValueError(
+            f"endpoint 수가 올바르지 않습니다: "
+            f"{len(endpoints):,} / 예상 {expected_count:,}"
+        )
+
+    return endpoints
+
+
+def group_endpoints_within_tolerance(
+    endpoints: pd.DataFrame,
+    tolerance_m: float = 1.0,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    지정 거리 이내의 endpoint를 동일한 스냅 그룹으로 묶는다.
+
+    그룹 대표 좌표는 실제 endpoint 중 하나를 사용하며, snap_group_id는
+    Python 전처리용 식별자일 뿐 DB의 route_vertex.vertex_id가 아니다.
+    """
+    if tolerance_m <= 0:
+        raise ValueError("스냅 허용오차는 0보다 커야 합니다.")
+    if endpoints.empty:
+        raise ValueError("그룹화할 endpoint가 없습니다.")
+
+    grouped = endpoints.copy()
+    coordinates = grouped[["x", "y"]].to_numpy(dtype=float)
+    endpoint_count = len(coordinates)
+
+    # 반경 검색을 반복해도 빠르게 가까운 endpoint를 찾도록 공간 트리를 만든다.
+    tree = cKDTree(coordinates)
+
+    # x, y, 원래 행 번호 순으로 처리하여 반복 실행 결과를 고정한다.
+    processing_order = np.lexsort(
+        (
+            np.arange(endpoint_count),
+            coordinates[:, 1],
+            coordinates[:, 0],
+        )
+    )
+
+    assignments = np.full(endpoint_count, -1, dtype=np.int64)
+    canonical_coordinates: list[np.ndarray] = []
+
+    for endpoint_index in processing_order:
+        if assignments[endpoint_index] != -1:
+            continue
+
+        snap_group_id = len(canonical_coordinates)
+        canonical_coordinate = coordinates[endpoint_index].copy()
+        canonical_coordinates.append(canonical_coordinate)
+
+        # 대표 좌표에서 tolerance_m 이내인 미배정 endpoint만 같은 그룹이 된다.
+        neighbor_indexes = tree.query_ball_point(
+            canonical_coordinate,
+            r=tolerance_m,
+        )
+
+        for neighbor_index in sorted(neighbor_indexes):
+            if assignments[neighbor_index] == -1:
+                assignments[neighbor_index] = snap_group_id
+
+    canonical_array = np.asarray(canonical_coordinates)
+
+    grouped["snap_group_id"] = assignments
+    grouped["canonical_x"] = canonical_array[assignments, 0]
+    grouped["canonical_y"] = canonical_array[assignments, 1]
+
+    # 원래 endpoint가 대표 좌표까지 실제로 이동할 거리를 계산한다.
+    grouped["snap_distance_m"] = np.hypot(
+        grouped["x"] - grouped["canonical_x"],
+        grouped["y"] - grouped["canonical_y"],
+    )
+
+    maximum_distance = grouped["snap_distance_m"].max()
+    if maximum_distance > tolerance_m + 1e-9:
+        raise ValueError(
+            f"스냅 이동거리가 {tolerance_m}m를 초과했습니다: "
+            f"{maximum_distance:.6f}m"
+        )
+
+    canonical_endpoints = pd.DataFrame(
+        {
+            "snap_group_id": np.arange(len(canonical_array)),
+            "x": canonical_array[:, 0],
+            "y": canonical_array[:, 1],
+        }
+    )
+
+    return grouped, canonical_endpoints
+
+
+def apply_canonical_endpoints_to_links(
+    links: gpd.GeoDataFrame,
+    grouped_endpoints: pd.DataFrame,
+) -> tuple[gpd.GeoDataFrame, dict]:
+    """
+    각 LineString의 시작점과 끝점을 스냅 그룹의 대표 좌표로 치환한다.
+
+    LineString 내부 vertex와 원본 속성은 그대로 보존한다. 원래부터 닫혀
+    있던 선은 유지하지만, 스냅 때문에 새로운 폐합 선이나 0m 선이 생기면
+    잘못된 topology가 되므로 검사를 중단한다.
+    """
+    expected_endpoint_count = len(links) * 2
+    if len(grouped_endpoints) != expected_endpoint_count:
+        raise ValueError(
+            "LINK와 endpoint 수가 일치하지 않습니다: "
+            f"{len(links):,} LINK, {len(grouped_endpoints):,} endpoint"
+        )
+
+    endpoint_keys = grouped_endpoints.set_index(
+        ["link_index", "endpoint_type"]
+    )
+    if not endpoint_keys.index.is_unique:
+        raise ValueError("LINK별 start/end endpoint 키가 중복되었습니다.")
+
+    snapped_geometries: list[LineString] = []
+    original_closed_flags: list[bool] = []
+
+    for link_index, geometry in links.geometry.items():
+        coordinates = list(geometry.coords)
+        original_closed_flags.append(coordinates[0] == coordinates[-1])
+
+        try:
+            start_endpoint = endpoint_keys.loc[(link_index, "start")]
+            end_endpoint = endpoint_keys.loc[(link_index, "end")]
+        except KeyError as error:
+            raise ValueError(
+                f"LINK {link_index}의 start/end endpoint가 없습니다."
+            ) from error
+
+        # 내부 좌표는 건드리지 않고 양 끝 좌표만 canonical 좌표로 교체한다.
+        coordinates[0] = (
+            float(start_endpoint["canonical_x"]),
+            float(start_endpoint["canonical_y"]),
+        )
+        coordinates[-1] = (
+            float(end_endpoint["canonical_x"]),
+            float(end_endpoint["canonical_y"]),
+        )
+        snapped_geometries.append(LineString(coordinates))
+
+    snapped_links = links.copy()
+    snapped_links = snapped_links.set_geometry(
+        gpd.GeoSeries(
+            snapped_geometries,
+            index=links.index,
+            crs=links.crs,
+        )
+    )
+
+    original_lengths = links.geometry.length
+    snapped_lengths = snapped_links.geometry.length
+    snapped_links["calculated_length_m"] = snapped_lengths
+
+    snapped_closed_flags = np.asarray(
+        [
+            geometry.coords[0] == geometry.coords[-1]
+            for geometry in snapped_links.geometry
+        ]
+    )
+    original_closed_array = np.asarray(original_closed_flags)
+    new_closed_count = int(
+        (snapped_closed_flags & ~original_closed_array).sum()
+    )
+    zero_length_count = int((snapped_lengths <= 0).sum())
+
+    if new_closed_count:
+        raise ValueError(
+            f"스냅으로 새로운 폐합 LINK가 {new_closed_count:,}개 생겼습니다."
+        )
+    if zero_length_count:
+        raise ValueError(
+            f"스냅으로 0m LINK가 {zero_length_count:,}개 생겼습니다."
+        )
+    if snapped_links.geometry.is_empty.any():
+        raise ValueError("스냅 후 비어 있는 LINK geometry가 있습니다.")
+    if not snapped_links.geometry.is_valid.all():
+        raise ValueError("스냅 후 유효하지 않은 LINK geometry가 있습니다.")
+
+    statistics = {
+        "link_count": len(snapped_links),
+        "changed_link_count": int(
+            grouped_endpoints.loc[
+                grouped_endpoints["snap_distance_m"] > 0,
+                "link_index",
+            ].nunique()
+        ),
+        "original_closed_count": int(original_closed_array.sum()),
+        "snapped_closed_count": int(snapped_closed_flags.sum()),
+        "new_closed_count": new_closed_count,
+        "zero_length_count": zero_length_count,
+        "maximum_length_change_m": float(
+            (snapped_lengths - original_lengths).abs().max()
+        ),
+    }
+
+    return snapped_links, statistics
+
+
 def validate_spatial_data(
     nodes: gpd.GeoDataFrame,
     links: gpd.GeoDataFrame,
@@ -329,6 +576,96 @@ def write_interim_network(
         mode="a",
         index=False,
     )
+
+
+def build_snapped_output(
+    snapped_links: gpd.GeoDataFrame,
+) -> gpd.GeoDataFrame:
+    """스냅 LINK를 route_segment_staging 적재용 컬럼 구조로 정리한다."""
+    output = snapped_links.copy()
+
+    # 원본 LINK ID는 중구 보행망 안에서 유일한 경우 segment_id로 보존한다.
+    if not output["original_link_id"].is_unique:
+        raise ValueError("원본 LINK ID가 중복되어 segment_id로 사용할 수 없습니다.")
+
+    output["segment_id"] = output["original_link_id"].astype("int64")
+    output["length_m"] = output.geometry.length
+
+    output_columns = [
+        "segment_id",
+        "link_type_code",
+        "original_start_node_id",
+        "original_end_node_id",
+        "length_m",
+        "geometry",
+    ]
+    return output[output_columns]
+
+
+def write_snapped_network(snapped_output: gpd.GeoDataFrame) -> None:
+    """staging 적재 전 스냅 LINK를 processed GeoPackage로 저장한다."""
+    PROCESSED_NETWORK_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 재실행 결과가 이전 레이어와 섞이지 않도록 파생 파일만 새로 만든다.
+    if SNAPPED_NETWORK_PATH.exists():
+        SNAPPED_NETWORK_PATH.unlink()
+
+    snapped_output.to_file(
+        SNAPPED_NETWORK_PATH,
+        layer="snapped_links",
+        driver="GPKG",
+        index=False,
+    )
+
+
+def validate_snapped_network_file(expected_count: int) -> gpd.GeoDataFrame:
+    """저장한 processed GeoPackage를 다시 읽어 행·컬럼·공간값을 검사한다."""
+    saved_links = gpd.read_file(
+        SNAPPED_NETWORK_PATH,
+        layer="snapped_links",
+    )
+
+    required_columns = {
+        "segment_id",
+        "link_type_code",
+        "original_start_node_id",
+        "original_end_node_id",
+        "length_m",
+        "geometry",
+    }
+    missing_columns = required_columns - set(saved_links.columns)
+
+    if missing_columns:
+        raise ValueError(
+            "스냅 파일에 필수 컬럼이 없습니다: "
+            + ", ".join(sorted(missing_columns))
+        )
+    if len(saved_links) != expected_count:
+        raise ValueError(
+            f"스냅 파일 행 수가 다릅니다: {len(saved_links):,} / "
+            f"예상 {expected_count:,}"
+        )
+    if not saved_links["segment_id"].is_unique:
+        raise ValueError("스냅 파일의 segment_id가 중복되었습니다.")
+    if saved_links.crs is None or saved_links.crs.to_epsg() != 5186:
+        raise ValueError(f"스냅 파일 CRS가 EPSG:5186이 아닙니다: {saved_links.crs}")
+    if not saved_links.geometry.geom_type.eq("LineString").all():
+        raise ValueError("스냅 파일에 LineString이 아닌 geometry가 있습니다.")
+    if saved_links.geometry.is_empty.any() or saved_links.geometry.isna().any():
+        raise ValueError("스냅 파일에 비어 있거나 누락된 geometry가 있습니다.")
+    if not saved_links.geometry.is_valid.all():
+        raise ValueError("스냅 파일에 유효하지 않은 geometry가 있습니다.")
+    if (saved_links["length_m"] <= 0).any():
+        raise ValueError("스냅 파일에 길이가 0 이하인 LINK가 있습니다.")
+    if not np.allclose(
+        saved_links["length_m"],
+        saved_links.geometry.length,
+        rtol=0,
+        atol=1e-6,
+    ):
+        raise ValueError("스냅 파일의 length_m과 실제 geometry 길이가 다릅니다.")
+
+    return saved_links
 
 
 def print_spatial_result(
@@ -405,12 +742,68 @@ def main() -> None:
     junggu_rows = load_junggu_rows()
     nodes = build_nodes(junggu_rows)
     links = build_walkable_links(junggu_rows)
+    endpoints = extract_link_endpoints(links)
+    grouped_endpoints, canonical_endpoints = (
+        group_endpoints_within_tolerance(endpoints)
+    )
+    snapped_links, snap_geometry_statistics = (
+        apply_canonical_endpoints_to_links(links, grouped_endpoints)
+    )
+    snapped_output = build_snapped_output(snapped_links)
 
-    validate_spatial_data(nodes, links)
+    print()
+    print("[LINK endpoint 추출]")
+    print(f"  LINK 수: {len(links):,}")
+    print(f"  endpoint 레코드 수: {len(endpoints):,}")
+    print(
+        "  고유 endpoint 좌표 수: "
+        f"{endpoints[['x', 'y']].drop_duplicates().shape[0]:,}"
+    )
+
+    print()
+    print("[endpoint 1m 그룹화]")
+    print(
+        "  스냅 전 고유 좌표: "
+        f"{endpoints[['x', 'y']].drop_duplicates().shape[0]:,}"
+    )
+    print(f"  스냅 후 대표 좌표: {len(canonical_endpoints):,}")
+    print(
+        "  이동한 endpoint: "
+        f"{grouped_endpoints['snap_distance_m'].gt(0).sum():,}"
+    )
+    print(
+        "  최대 이동거리: "
+        f"{grouped_endpoints['snap_distance_m'].max():.6f} m"
+    )
+
+    print()
+    print("[LINK endpoint 좌표 치환]")
+    print(f"  처리 LINK: {snap_geometry_statistics['link_count']:,}")
+    print(f"  좌표가 변경된 LINK: {snap_geometry_statistics['changed_link_count']:,}")
+    print(f"  기존 폐합 LINK: {snap_geometry_statistics['original_closed_count']:,}")
+    print(f"  스냅 후 폐합 LINK: {snap_geometry_statistics['snapped_closed_count']:,}")
+    print(f"  새로 생긴 폐합 LINK: {snap_geometry_statistics['new_closed_count']:,}")
+    print(f"  0m LINK: {snap_geometry_statistics['zero_length_count']:,}")
+    print(
+        "  최대 길이 변화: "
+        f"{snap_geometry_statistics['maximum_length_change_m']:.6f} m"
+    )
+
+    validate_spatial_data(nodes, snapped_links)
     write_interim_network(nodes, links)
     print_spatial_result(nodes, links)
 
-    print("\n[D1 도보망 정제 착수 완료]")
+    write_snapped_network(snapped_output)
+    saved_snapped_links = validate_snapped_network_file(len(snapped_output))
+
+    print()
+    print("[D2 processed 스냅 파일]")
+    print(f"  저장 행 수: {len(saved_snapped_links):,}")
+    print(f"  CRS: {saved_snapped_links.crs}")
+    print(f"  레이어: snapped_links")
+    print(f"  파일: {SNAPPED_NETWORK_PATH}")
+
+    print("\n[D2-2 스냅 산출물 저장 완료]")
 
 
 if __name__ == "__main__":
