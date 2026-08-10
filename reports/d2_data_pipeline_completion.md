@@ -130,4 +130,5 @@ QGIS digitizing과 현장·운영 조건 확인을 마친 뒤에만 실행한다
 - `segment_sample_point` DB 적재 완료
 - 산책 API 관련 Java 파일과 DB 데이터는 이번 단계에서 변경하지 않음
 - 다음 단계는 기존 `walk_session`, `walk_track_point` 스키마를 확인하고
-  `start → points → end` 계약을 사용자와 함께 확정하는 것
+  확정한 [`walk-session-api-contract.md`](../../backend/docs/walk-session-api-contract.md)를
+  기준으로 `start → points → end`를 구현하는 것
