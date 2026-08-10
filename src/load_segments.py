@@ -1,3 +1,4 @@
+import csv
 import os
 from pathlib import Path
 
@@ -17,7 +18,10 @@ SNAPPED_NETWORK_PATH = (
     / "junggu_walk_network_snapped.gpkg"
 )
 SNAPPED_LAYER = "snapped_links"
-EXPECTED_LINK_COUNT = 7_771
+EXCLUSION_PATH = PIPELINE_ROOT / "config" / "network_exclusions.csv"
+EXPECTED_INPUT_LINK_COUNT = 7_771
+EXPECTED_ROUTABLE_LINK_COUNT = 7_766
+ACTIVE_EXCLUSION_STATUSES = {"EXCLUDE", "EXCLUDE_TEMPORARY"}
 
 
 def read_env_file(path: Path) -> dict[str, str]:
@@ -102,10 +106,10 @@ def load_and_validate_snapped_links() -> gpd.GeoDataFrame:
             "적재 파일에 필수 컬럼이 없습니다: "
             + ", ".join(sorted(missing_columns))
         )
-    if len(links) != EXPECTED_LINK_COUNT:
+    if len(links) != EXPECTED_INPUT_LINK_COUNT:
         raise ValueError(
             f"적재 LINK 수가 다릅니다: {len(links):,} / "
-            f"예상 {EXPECTED_LINK_COUNT:,}"
+            f"예상 {EXPECTED_INPUT_LINK_COUNT:,}"
         )
     if not links["segment_id"].is_unique:
         raise ValueError("segment_id가 중복되었습니다.")
@@ -121,6 +125,59 @@ def load_and_validate_snapped_links() -> gpd.GeoDataFrame:
         raise ValueError("길이가 0 이하인 LINK가 있습니다.")
 
     return links
+
+
+def apply_network_exclusions(
+    links: gpd.GeoDataFrame,
+) -> tuple[gpd.GeoDataFrame, dict[int, str]]:
+    """QA 제외 설정을 읽어 staging에 넣지 않을 LINK를 제거한다.
+
+    원본 processed GeoPackage는 수정하지 않는다. `EXCLUDE`와
+    `EXCLUDE_TEMPORARY` 상태만 활성 제외로 취급하며, 설정의 모든 segment가
+    현재 입력에 실제로 존재하는지 확인한다.
+    """
+    if not EXCLUSION_PATH.exists():
+        raise FileNotFoundError(f"네트워크 제외 설정이 없습니다: {EXCLUSION_PATH}")
+
+    with EXCLUSION_PATH.open("r", encoding="utf-8-sig", newline="") as file:
+        reader = csv.DictReader(file)
+        required_columns = {"segment_id", "status", "exclusion_code"}
+        missing_columns = required_columns - set(reader.fieldnames or [])
+        if missing_columns:
+            raise ValueError(
+                "제외 설정에 필수 컬럼이 없습니다: "
+                + ", ".join(sorted(missing_columns))
+            )
+
+        exclusions: dict[int, str] = {}
+        for row in reader:
+            status = row["status"].strip().upper()
+            if status not in ACTIVE_EXCLUSION_STATUSES:
+                continue
+
+            segment_id = int(row["segment_id"])
+            if segment_id in exclusions:
+                raise ValueError(
+                    f"제외 설정에 segment_id가 중복되었습니다: {segment_id}"
+                )
+            exclusions[segment_id] = row["exclusion_code"].strip().upper()
+
+    input_segment_ids = set(links["segment_id"].astype("int64"))
+    missing_segment_ids = set(exclusions) - input_segment_ids
+    if missing_segment_ids:
+        missing = ", ".join(str(value) for value in sorted(missing_segment_ids))
+        raise ValueError(f"입력 도보망에 없는 제외 segment_id가 있습니다: {missing}")
+
+    routable_links = links.loc[
+        ~links["segment_id"].astype("int64").isin(exclusions)
+    ].copy()
+    if len(routable_links) != EXPECTED_ROUTABLE_LINK_COUNT:
+        raise ValueError(
+            f"제외 후 LINK 수가 다릅니다: {len(routable_links):,} / "
+            f"예상 {EXPECTED_ROUTABLE_LINK_COUNT:,}"
+        )
+
+    return routable_links, exclusions
 
 
 def make_insert_rows(links: gpd.GeoDataFrame) -> list[tuple]:
@@ -257,12 +314,17 @@ def load_staging_table(
 
 def main() -> None:
     """D2 processed 도보망을 DB staging에 적재하고 결과를 출력한다."""
-    links = load_and_validate_snapped_links()
+    input_links = load_and_validate_snapped_links()
+    links, exclusions = apply_network_exclusions(input_links)
     db_config = build_db_config()
 
     print(f"[입력 파일] {SNAPPED_NETWORK_PATH}")
     print(f"[입력 레이어] {SNAPPED_LAYER}")
-    print(f"[입력 LINK] {len(links):,}")
+    print(f"[원본 processed LINK] {len(input_links):,}")
+    print(f"[QA 제외 LINK] {len(exclusions):,}")
+    for segment_id, exclusion_code in sorted(exclusions.items()):
+        print(f"  {segment_id}: {exclusion_code}")
+    print(f"[routing 대상 LINK] {len(links):,}")
     print(
         "[DB 연결] "
         f"{db_config['host']}:{db_config['port']}/{db_config['dbname']}"

@@ -1,0 +1,6 @@
+segment_id,qa_component,exclusion_code,reason,evidence,status,reviewed_on
+271404,344,INDOOR,"건물 내부 LINK로 야외 반려견 산책망에서 제외","원본 raw_is_indoor=1",EXCLUDE,2026-08-10
+74299,131,CONSTRUCTION,"공사장 부지 내부의 현재 이용 불가 LINK","위성영상에서 공사장 내부로 확인; 영상 시점에 따라 재검토 필요",EXCLUDE_TEMPORARY,2026-08-10
+10384,2973,PRIVATE_ACCESS,"호텔·회원제 클럽 내부 시설 동선","위성영상 및 지도에서 수영장·테니스장·골프연습장 등 사유 시설 내부로 확인",EXCLUDE,2026-08-10
+118064,2973,PRIVATE_ACCESS,"호텔·회원제 클럽 내부 시설 동선","위성영상 및 지도에서 수영장·테니스장·골프연습장 등 사유 시설 내부로 확인",EXCLUDE,2026-08-10
+147186,2973,PRIVATE_ACCESS,"호텔·회원제 클럽 내부의 폐합 LINK","위성영상 및 지도에서 사유 시설 내부로 확인; source=target 폐합 LINK",EXCLUDE,2026-08-10
