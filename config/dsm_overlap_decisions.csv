@@ -1,0 +1,14 @@
+segment_id,decision,shadow_policy,reason,evidence,status,reviewed_on
+99075,KEEP_COVERED_PASSAGE,FORCE_BUILDING_SHADE,"건물 외곽 또는 상부 구조 아래를 통과하지만 실제 공개 보행로가 존재함","QGIS 도보망·위성영상·거리뷰에서 보도와 건물 하부 통행 공간 확인",CONFIRMED,2026-08-11
+216272,KEEP_FOOTPRINT_OFFSET,SAMPLE_NEAREST_GROUND,"건물 내부나 하부 통로가 아니라 건물 옆 정상 보도이며 footprint가 보도 쪽으로 겹침","QGIS 도보망·위성영상·사용자 거리뷰 확인",CONFIRMED,2026-08-11
+179751,KEEP_COVERED_PASSAGE,FORCE_BUILDING_SHADE,"지붕이 덮인 시장형 통행로이지만 보행 가능한 공개 동선이 존재함","거리뷰에서 차양·상부 구조 아래 연속 보행 통로 확인",CONFIRMED,2026-08-11
+140037,KEEP_FOOTPRINT_OFFSET,SAMPLE_NEAREST_GROUND,"건물 내부가 아니라 건물 옆 정상 보도이며 footprint가 보도 쪽으로 겹침","거리뷰에서 연속된 외부 보도와 점자블록 확인",CONFIRMED,2026-08-11
+140271,KEEP_COVERED_PASSAGE,FORCE_BUILDING_SHADE,"건물 내부 또는 상부 구조 아래를 통과하지만 실제 공개 보행 동선이 존재함","거리뷰에서 지붕과 건물 구조 아래로 이어지는 시장형 보행 통로 확인",CONFIRMED,2026-08-11
+127887,KEEP_COVERED_PASSAGE,FORCE_BUILDING_SHADE,"건물 옆 보행로 위를 연결 통로와 지붕 구조물이 연속적으로 덮지만 실제 공개 보행 동선이 존재함","거리뷰에서 상부 연결 구조 아래의 연속된 보도 확인",CONFIRMED,2026-08-11
+231166,KEEP_COVERED_PASSAGE,FORCE_BUILDING_SHADE,"상부 건축 구조 아래로 도로와 보도가 통과하지만 실제 공개 보행 동선이 존재함","거리뷰에서 기둥과 천장 구조 아래로 이어지는 연속된 통행로 확인",CONFIRMED,2026-08-11
+253958,KEEP_COVERED_PASSAGE,FORCE_BUILDING_SHADE,"고가 연결통로 아래로 보도와 도로가 이어지며 실제 공개 보행 동선이 존재함","거리뷰에서 기둥으로 지지된 장거리 상부 연결통로 아래의 연속 보행 공간 확인",CONFIRMED,2026-08-11
+231025,KEEP_COVERED_PASSAGE,FORCE_BUILDING_SHADE,"아파트 단지 내부의 실제 보행 동선이며 건물 중첩 구간은 입구 필로티와 연결 구조 아래를 통과함","거리뷰에서 단지 내부 보도와 상부 구조 아래 통행 공간 확인; 출입 제한 여부는 별도 접근성 QA 필요",CONFIRMED,2026-08-11
+221983,KEEP_FOOTPRINT_OFFSET,SAMPLE_NEAREST_GROUND,"아파트 단지 내부의 개방형 보행 동선으로 추정되며 건물 footprint 중첩 가능성이 높음","인접 거리뷰에서 해당 방향으로 이어지는 단지 내부 보행로 확인; 정확한 segment 구간은 직접 확인되지 않음",PROVISIONAL,2026-08-11
+135500,KEEP_COVERED_PASSAGE,FORCE_BUILDING_SHADE,"건물 아래를 통과하지만 실제 보행 가능한 동선이 존재함","사용자 거리뷰 확인으로 건물 하부 보행로 판정",CONFIRMED,2026-08-11
+105789,KEEP_COVERED_PASSAGE,FORCE_BUILDING_SHADE,"건물 사이의 실제 보행 동선이며 건물 중첩 구간 일부가 필로티 아래를 통과함","거리뷰에서 개방 구간과 건물 하부 구간이 이어지는 단지 내 보행로 확인",CONFIRMED,2026-08-11
+151606,KEEP_COVERED_PASSAGE,FORCE_BUILDING_SHADE,"건물 아래를 통과하지만 실제 보행 가능한 동선이 존재함","사용자 거리뷰 확인으로 건물 하부 보행로 판정",CONFIRMED,2026-08-11
