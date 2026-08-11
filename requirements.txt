@@ -1,0 +1,3 @@
+# QGIS Python 3.12에는 NumPy, pandas, SciPy, GDAL, pyproj가 포함되어 있다.
+# D3 태양 위치 계산에 추가로 필요한 외부 라이브러리만 고정한다.
+pvlib==0.13.1

@@ -1,8 +1,7 @@
 # D2 데이터 파이프라인 완료 보고서
 
-- 완료일: 2026-08-10
-- 범위: 도보망 topology, routing QA, 수동 connector 검토 준비, 10m 공통 분할점
-- 제외 범위: 산책 세션 API는 사용자와 함께 진행하기 위해 다음 단계로 보류
+- 완료일: 2026-08-11
+- 범위: 도보망 topology, routing QA, 수동 connector 검토 준비, 10m 공통 분할점, 산책 세션 API
 - pgRouting: 3.8.0
 - 내부 공간연산 좌표계: EPSG:5186
 
@@ -124,11 +123,66 @@ QGIS digitizing과 현장·운영 조건 확인을 마친 뒤에만 실행한다
 & $qgisPython data-pipeline/src/validate_connector_draft.py --candidate MR-CONN-001
 ```
 
-## 7. 산책 API 시작 전 상태
+## 7. 산책 세션 API
 
-- D2 데이터 파이프라인 필수 완료 조건인 `pgr_dijkstra()` 성공
-- `segment_sample_point` DB 적재 완료
-- 산책 API 관련 Java 파일과 DB 데이터는 이번 단계에서 변경하지 않음
-- 다음 단계는 기존 `walk_session`, `walk_track_point` 스키마를 확인하고
-  확정한 [`walk-session-api-contract.md`](../../backend/docs/walk-session-api-contract.md)를
-  기준으로 `start → points → end`를 구현하는 것
+확정한
+[`walk-session-api-contract.md`](../../backend/docs/walk-session-api-contract.md)를
+기준으로 `start → points → end` 흐름을 구현했다.
+
+### 구현 범위
+
+- `POST /api/walks/start`
+  - 사용자 존재 확인
+  - 동일 사용자의 활성 산책 중복 방지
+  - `201 Created`와 `Location` 헤더 반환
+- `POST /api/walks/{sessionId}/points`
+  - 세션 행 쓰기 잠금 후 활성 여부 확인
+  - 위도·경도·정확도·기록 시각 검증
+  - EPSG:4326 입력 좌표를 PostGIS에서 EPSG:5186으로 변환해 저장
+  - 정상 저장 시 `204 No Content` 반환
+- `POST /api/walks/{sessionId}/end`
+  - 세션 행 쓰기 잠금
+  - usable point를 `recorded_at, point_id` 순서로 정렬
+  - EPSG:5186 평면거리 합계와 `track_geom` 계산
+  - 전체·usable 포인트 수와 소요 시간 반환
+  - 재호출 시 기존 종료 결과를 반환하는 멱등 처리
+
+사용자별 활성 산책은 V5 partial unique index를 DB 최종 안전장치로 사용한다.
+D2에서는 도보망 맵매칭을 수행하지 않으며, 포인트가 충분하면
+`NOT_PERFORMED`, 부족하면 `INSUFFICIENT_POINTS`를 반환한다.
+
+### 통합 QA 결과
+
+2026-08-11 로컬 Spring Boot와 PostgreSQL/PostGIS 환경에서 다음 흐름을
+실제 호출하고 DB 결과를 대조했다.
+
+| 검사항목 | 결과 |
+| --- | --- |
+| 산책 시작 | `201 Created` |
+| 서로 다른 GPS 포인트 2건 저장 | 각각 `204 No Content` |
+| 산책 종료 | `200 OK` |
+| 전체 / usable / 서로 다른 usable 포인트 | 2 / 2 / 2 |
+| 계산 거리 | 56.7m |
+| `track_geom` SRID | 5186 |
+| `track_geom` 점 수 / geometry 유효성 | 2 / 유효 |
+| 잘못된 SRID 포인트 | 0 |
+| 종료 상태 | `NOT_PERFORMED` |
+| 종료 API 재호출 | 기존 `endedAt`, 거리, 시간 그대로 `200 OK` |
+| 종료된 세션에 포인트 추가 | `409 WALK_SESSION_ALREADY_ENDED` |
+| 포인트 1건 세션 종료 | `distanceM=0.0`, `INSUFFICIENT_POINTS` |
+
+종료 API native projection에서 PostgreSQL `TIMESTAMPTZ`가 `Instant`로
+반환되는 점을 반영해, API 응답 경계에서 UTC `OffsetDateTime`으로 변환한다.
+Java 컴파일, Spring Context 테스트와 PostGIS 집계 SQL 실행 계획 검증도
+통과했다.
+
+## 8. D2 완료 판정
+
+- deprecated된 `pgr_createTopology()`과 `pgr_analyzeGraph()`에 의존하지 않음
+- 좌표 기반 endpoint 1m 스냅과 topology 구성 완료
+- `pgr_connectedComponents()`, `pgr_degree()`, `pgr_dijkstra()` 검증 완료
+- 약 10m 공통 분할점 생성 및 DB 적재 완료
+- 산책 세션 `start → points → end` 통합 흐름과 오류·멱등 처리 확인 완료
+
+따라서 D2 필수 범위를 완료로 판정한다. 수동 connector의 현장·운영 조건
+확인과 D6 맵매칭은 후속 범위로 유지한다.
