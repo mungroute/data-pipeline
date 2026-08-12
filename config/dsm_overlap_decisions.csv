@@ -7,7 +7,7 @@ segment_id,decision,shadow_policy,reason,evidence,status,reviewed_on
 127887,KEEP_COVERED_PASSAGE,FORCE_BUILDING_SHADE,"건물 옆 보행로 위를 연결 통로와 지붕 구조물이 연속적으로 덮지만 실제 공개 보행 동선이 존재함","거리뷰에서 상부 연결 구조 아래의 연속된 보도 확인",CONFIRMED,2026-08-11
 231166,KEEP_COVERED_PASSAGE,FORCE_BUILDING_SHADE,"상부 건축 구조 아래로 도로와 보도가 통과하지만 실제 공개 보행 동선이 존재함","거리뷰에서 기둥과 천장 구조 아래로 이어지는 연속된 통행로 확인",CONFIRMED,2026-08-11
 253958,KEEP_COVERED_PASSAGE,FORCE_BUILDING_SHADE,"고가 연결통로 아래로 보도와 도로가 이어지며 실제 공개 보행 동선이 존재함","거리뷰에서 기둥으로 지지된 장거리 상부 연결통로 아래의 연속 보행 공간 확인",CONFIRMED,2026-08-11
-231025,KEEP_COVERED_PASSAGE,FORCE_BUILDING_SHADE,"아파트 단지 내부의 실제 보행 동선이며 건물 중첩 구간은 입구 필로티와 연결 구조 아래를 통과함","거리뷰에서 단지 내부 보도와 상부 구조 아래 통행 공간 확인; 출입 제한 여부는 별도 접근성 QA 필요",CONFIRMED,2026-08-11
+231025,KEEP_FOOTPRINT_OFFSET,SAMPLE_NEAREST_GROUND,"LIG 서울역리가 아파트 단지 내부의 지붕 없는 야외 보행로이며 건물 footprint가 보행로까지 겹친 것으로 판정","QGIS SVF QA와 위성영상에서 101~104동 주변을 순환하는 야외 보행 동선 확인; 출입 제한 여부는 별도 접근성 QA 필요",CONFIRMED,2026-08-12
 221983,KEEP_FOOTPRINT_OFFSET,SAMPLE_NEAREST_GROUND,"아파트 단지 내부의 개방형 보행 동선으로 추정되며 건물 footprint 중첩 가능성이 높음","인접 거리뷰에서 해당 방향으로 이어지는 단지 내부 보행로 확인; 정확한 segment 구간은 직접 확인되지 않음",PROVISIONAL,2026-08-11
 135500,KEEP_COVERED_PASSAGE,FORCE_BUILDING_SHADE,"건물 아래를 통과하지만 실제 보행 가능한 동선이 존재함","사용자 거리뷰 확인으로 건물 하부 보행로 판정",CONFIRMED,2026-08-11
 105789,KEEP_COVERED_PASSAGE,FORCE_BUILDING_SHADE,"건물 사이의 실제 보행 동선이며 건물 중첩 구간 일부가 필로티 아래를 통과함","거리뷰에서 개방 구간과 건물 하부 구간이 이어지는 단지 내 보행로 확인",CONFIRMED,2026-08-11
