@@ -35,9 +35,10 @@ DEFAULT_SAMPLE_OUTPUT = D4_OUTPUT_DIR / "d4_sample_surface.csv"
 DEFAULT_ROUTE_OUTPUT = D4_OUTPUT_DIR / "d4_route_surface.csv"
 DEFAULT_QA_OUTPUT = D4_QA_DIR / "d4_surface_qa.gpkg"
 DEFAULT_REPORT = PIPELINE_ROOT / "reports" / "d4_surface_qa.md"
+DEFAULT_OVERRIDE_PATH = PIPELINE_ROOT / "config" / "surface_overrides.csv"
 
-# 환경부 세분류는 노면 재질도가 아니다. 자연 피복만 직접 재질로 보고,
-# 시가화·교통 피복은 보행 링크의 차량 통행 가능 여부로 포장 종류를 보완한다.
+# Land-cover polygons describe surrounding context, not the material underfoot.
+# Grass/soil therefore require a field-confirmed manual override.
 SOIL_CODES = {"222", "231", "251", "252", "311", "321", "331", "612", "613", "623"}
 GRASS_CODES = {"411", "422", "423", "622"}
 AMBIGUOUS_URBAN_CODES = {
@@ -65,6 +66,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--route-output", type=Path, default=DEFAULT_ROUTE_OUTPUT)
     parser.add_argument("--qa-gpkg", type=Path, default=DEFAULT_QA_OUTPUT)
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
+    parser.add_argument("--overrides", type=Path, default=DEFAULT_OVERRIDE_PATH)
     parser.add_argument("--nearest-m", type=float, default=5.0)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
@@ -143,15 +145,58 @@ def has_vehicle_access(link_type_code: str) -> bool:
 def classify_material(landcover_code: str | None, link_type_code: str) -> tuple[str, str, str]:
     """토지피복과 통행 주체를 결합해 재질·근거·품질등급을 반환한다."""
     code = (landcover_code or "").strip()
-    if code in GRASS_CODES:
-        return "grass", "LANDCOVER_NATURAL", "A"
-    if code in SOIL_CODES:
-        return "soil", "LANDCOVER_NATURAL", "A"
+    link_surface = "asphalt" if has_vehicle_access(link_type_code) else "pavement"
+    # Land-cover polygons may include a sidewalk beside a planted strip. Treat
+    # natural cover as context, not as proof of the material under a pedestrian.
+    if code in GRASS_CODES or code in SOIL_CODES:
+        return link_surface, "LANDCOVER_CONTEXT_LINKTYPE", "C"
     if code in AMBIGUOUS_URBAN_CODES:
-        if has_vehicle_access(link_type_code):
-            return "asphalt", "LANDCOVER_LINKTYPE", "B"
-        return "pavement", "LANDCOVER_LINKTYPE", "B"
-    return "asphalt", "DEFAULT_ASPHALT", "D"
+        return link_surface, "LANDCOVER_LINKTYPE", "B"
+    return link_surface, "DEFAULT_LINKTYPE", "D"
+
+
+def load_surface_overrides(path: Path) -> pd.DataFrame:
+    """Load strictly validated, field-confirmed segment material overrides."""
+    columns = ["segment_id", "surface_type", "reason", "verified_by"]
+    if not path.exists():
+        return pd.DataFrame(columns=columns)
+    overrides = pd.read_csv(path, encoding="utf-8-sig")
+    missing = set(columns) - set(overrides.columns)
+    if missing:
+        raise ValueError("Missing surface override columns: " + ", ".join(sorted(missing)))
+    overrides = overrides[columns].dropna(subset=["segment_id", "surface_type"]).copy()
+    if overrides.empty:
+        return overrides
+    overrides["segment_id"] = overrides["segment_id"].astype("int64")
+    overrides["surface_type"] = overrides["surface_type"].astype(str).str.strip()
+    if overrides["segment_id"].duplicated().any():
+        duplicated = overrides.loc[overrides["segment_id"].duplicated(), "segment_id"].tolist()
+        raise ValueError(f"Duplicate surface override segment_id: {duplicated}")
+    invalid = sorted(set(overrides["surface_type"]) - set(SURFACE_PROPERTIES))
+    if invalid:
+        raise ValueError("Unsupported override surface: " + ", ".join(invalid))
+    return overrides
+
+
+def apply_surface_overrides(samples: pd.DataFrame, overrides: pd.DataFrame) -> pd.DataFrame:
+    """Apply a verified material and its properties to every sample on a segment."""
+    if overrides.empty:
+        return samples
+    missing_ids = sorted(set(overrides["segment_id"]) - set(samples["segment_id"]))
+    if missing_ids:
+        raise ValueError(f"Override segment_id has no DB samples: {missing_ids}")
+
+    result = samples.copy()
+    for row in overrides.itertuples(index=False):
+        mask = result["segment_id"] == int(row.segment_id)
+        properties = SURFACE_PROPERTIES[str(row.surface_type)]
+        result.loc[mask, "surface_type"] = str(row.surface_type)
+        result.loc[mask, "albedo"] = properties.albedo
+        result.loc[mask, "emissivity"] = properties.emissivity
+        result.loc[mask, "ground_flux_ratio"] = properties.ground_flux_ratio
+        result.loc[mask, "classification_basis"] = "MANUAL_VERIFIED"
+        result.loc[mask, "surface_quality"] = "A"
+    return result
 
 
 def assign_landcover(samples: pd.DataFrame, polygons: list[LandcoverPolygon], nearest_m: float) -> pd.DataFrame:
@@ -311,6 +356,45 @@ def write_report(samples: pd.DataFrame, routes: pd.DataFrame, path: Path) -> Non
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def write_surface_policy_report(samples: pd.DataFrame, routes: pd.DataFrame, path: Path) -> None:
+    """Write the revised classification policy and its QA statistics."""
+    source_counts = samples["match_source"].value_counts().to_dict()
+    material_counts = samples["surface_type"].value_counts().to_dict()
+    quality_counts = routes["surface_quality"].value_counts().to_dict()
+    basis_counts = samples["classification_basis"].value_counts().to_dict()
+    mean_difference = float((routes["albedo"] - routes["simple_albedo"]).abs().mean())
+    max_difference = float((routes["albedo"] - routes["simple_albedo"]).abs().max())
+    lines = [
+        "# D4-3·D4-4 노면 재질 및 물성 QA", "",
+        "## 수정된 분류 정책", "",
+        "- 토지피복도는 주변 환경의 맥락이며 실제 발밑 재질로 직접 확정하지 않는다.",
+        "- 차량 통행 링크는 asphalt, 보행 전용 링크는 pavement를 기본 통행 표면으로 판정한다.",
+        "- 자연피복과 겹친 링크는 경계 오차 가능성이 있으므로 C등급으로 낮춘다.",
+        "- 현장에서 확인한 비포장 구간만 config/surface_overrides.csv로 grass 또는 soil로 교정한다.",
+        "- 링크 물성은 각 샘플의 실제 대표 길이를 이용해 길이가중 집계한다.", "",
+        "## 커버리지", "",
+        f"- 샘플: {len(samples):,}",
+        f"- 링크: {len(routes):,}",
+        f"- 토지피복 직접 교차: {source_counts.get('DIRECT', 0):,}",
+        f"- 5m 최근접: {source_counts.get('NEAREST_5M', 0):,}",
+        f"- 기본값: {source_counts.get('DEFAULT', 0):,}",
+        f"- 자연피복 경계와 겹쳐 링크 유형으로 판정: {basis_counts.get('LANDCOVER_CONTEXT_LINKTYPE', 0):,}",
+        f"- 현장 확인 수동 교정: {basis_counts.get('MANUAL_VERIFIED', 0):,}", "",
+        "## 샘플 재질 분포", "",
+    ]
+    lines.extend(f"- {key}: {value:,}" for key, value in sorted(material_counts.items()))
+    lines += ["", "## 링크 품질 분포", ""]
+    lines.extend(f"- {key}: {value:,}" for key, value in sorted(quality_counts.items()))
+    lines += [
+        "", "## 집계 검증", "",
+        f"- 길이가중 알베도와 단순평균의 평균 절대차: {mean_difference:.6f}",
+        f"- 길이가중 알베도와 단순평균의 최대 절대차: {max_difference:.6f}",
+        "- sample_id 1237 / segment_id 10940은 기타초지 경계와 겹치지만 현장상 보도블록이므로 pavement·C등급이다.",
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def main() -> None:
     """D4-3/4 파일 기반 계산을 실행한다."""
     args = parse_arguments()
@@ -321,11 +405,14 @@ def main() -> None:
     )
     polygons = load_landcover_polygons(args.landcover_dir.resolve(), bounds)
     classified = assign_landcover(samples, polygons, args.nearest_m)
+    classified = apply_surface_overrides(
+        classified, load_surface_overrides(args.overrides.resolve())
+    )
     routes = aggregate_routes(classified)
     validate_results(classified, routes)
     write_outputs(classified, routes, route_geometry, args.sample_output.resolve(),
                   args.route_output.resolve(), args.qa_gpkg.resolve(), args.overwrite)
-    write_report(classified, routes, args.report.resolve())
+    write_surface_policy_report(classified, routes, args.report.resolve())
     print(f"[완료] 샘플 {len(classified):,}, 링크 {len(routes):,}")
     print(f"[QA] {args.qa_gpkg.resolve()}")
     print("[안내] DB는 수정하지 않았습니다.")

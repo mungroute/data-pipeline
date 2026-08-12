@@ -135,8 +135,11 @@ def build_integrated() -> tuple[pd.DataFrame, gpd.GeoDataFrame, dict[str, float]
         ), axis=1,
     )
 
-    # 토지피복 154 등 도시피복의 재질 불확실성이 결과에 주는 범위를 계산한다.
-    ambiguous = sample_surface["classification_basis"] == "LANDCOVER_LINKTYPE"
+    # 토지피복도는 실제 발밑 재질도가 아니므로 도시피복뿐 아니라
+    # 자연피복 경계와 겹친 링크까지 asphalt/pavement 가정 민감도에 포함한다.
+    ambiguous = sample_surface["classification_basis"].isin(
+        ["LANDCOVER_LINKTYPE", "LANDCOVER_CONTEXT_LINKTYPE"]
+    )
     all_asphalt = sample_surface.copy()
     all_pavement = sample_surface.copy()
     for frame, material in ((all_asphalt, "asphalt"), (all_pavement, "pavement")):
@@ -227,7 +230,7 @@ def write_report(samples: pd.DataFrame, routes: pd.DataFrame, sensitivity: dict[
     temp_distribution = routes["temp_grade_new"].value_counts().to_dict()
     lines = [
         "# D4-3~D4-6 통합 QA 및 계산식 재검토", "", "## 완료 범위", "",
-        "- D4-3 환경부 세분류 + 보행 링크 유형 기반 노면 재질 분류",
+        "- D4-3 토지피복은 주변 맥락으로만 사용하고 보행 링크 유형으로 기본 노면 재질 분류",
         "- D4-4 샘플 물성 부여 및 링크 길이가중 집계",
         "- D4-5 UQT2xx 공원 폴리곤까지 거리 계산",
         "- D4-6 품질등급, 전체 커버리지, 민감도·반례 검증", "",
@@ -248,11 +251,11 @@ def write_report(samples: pd.DataFrame, routes: pd.DataFrame, sensitivity: dict[
         "4. **물성값**: 명세 기본값은 D5용 사전값이다. 현장 적외선 실측으로 직접 알베도를 추정할 수는 없으며, D5에서 재질별 온도 오차를 이용해 민감도·보정을 수행한다.",
         "5. **지중열비**: 고정비는 시간·수분·재질 상태를 생략한 근사다. FAO도 G/Rn 관계가 시간과 토양 상태에 민감한 근사임을 명시하므로 D5 검증 대상이다.", "",
         "## 재질 가정 민감도", "",
-        f"- 도시/도로 피복의 보완 분류 샘플: {int(sensitivity['ambiguous_samples']):,}",
+        f"- 토지피복과 링크 유형을 결합한 불확실 분류 샘플: {int(sensitivity['ambiguous_samples']):,}",
         f"- 현재 링크 평균 알베도: {sensitivity['baseline_mean_albedo']:.3f}",
         f"- 전부 asphalt 가정: {sensitivity['all_asphalt_mean_albedo']:.3f}",
         f"- 전부 pavement 가정: {sensitivity['all_pavement_mean_albedo']:.3f}",
-        "- 이 범위가 큰 것은 원본이 재질도가 아니라 토지이용도이기 때문이다. 현재는 차량 통행 비트와 중구 보도통계의 포장 구성을 결합한 값을 채택한다.", "",
+        "- 원본은 실제 노면 재질도가 아니므로 차량 통행 비트로 asphalt/pavement를 추정한다. grass/soil은 현장 확인 수동 교정만 허용한다.", "",
         "## 문헌 대조", "",
         "- 미국 EPA는 새 아스팔트 반사율을 대략 0.05~0.10, 새 콘크리트를 0.35~0.40으로 제시한다. 명세의 0.12/0.28은 노후·오염·블록 차이를 감안한 중간 사전값으로 보고 실측 보정한다.",
         "- USGS Spectral Library는 토양·식생·아스팔트·콘크리트의 실측 분광 자료를 제공하며 단일 상수보다 재료별 변동이 존재함을 전제로 한다.",
