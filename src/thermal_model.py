@@ -58,8 +58,17 @@ def solve_surface_temperature_array(*, albedo: np.ndarray, emissivity: np.ndarra
         solar_w_m2, svf, park_proximity_m,
     )]
     albedo, emissivity, ground_flux_ratio, air_temp_c, wind_m_s, solar_w_m2, svf, park_proximity_m = np.broadcast_arrays(*arrays)
+    if not all(np.all(np.isfinite(value)) for value in (
+        albedo, emissivity, ground_flux_ratio, air_temp_c, wind_m_s,
+        solar_w_m2, svf, park_proximity_m,
+    )):
+        raise ValueError("열모델 입력에 NaN 또는 무한대가 있습니다.")
     if np.any((albedo < 0) | (albedo > 1)) or np.any((emissivity <= 0) | (emissivity > 1)):
         raise ValueError("알베도와 방사율 범위를 벗어났습니다.")
+    if np.any((ground_flux_ratio < 0) | (ground_flux_ratio > 1)):
+        raise ValueError("지중열 비율은 0~1 범위여야 합니다.")
+    if park_cooling_max_c < 0 or park_cooling_distance_m <= 0:
+        raise ValueError("공원 냉각 상한은 0 이상, 적용 거리는 0보다 커야 합니다.")
     svf = np.clip(svf, 0.0, 1.0)
     low = air_temp_c - 30.0
     high = air_temp_c + 90.0

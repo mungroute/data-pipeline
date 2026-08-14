@@ -37,10 +37,14 @@ def aggregate_routes(samples: pd.DataFrame) -> pd.DataFrame:
         ordered = group.sort_values("chainage_m")
         length_m = float(ordered["length_m"].iloc[0])
         weights = sample_support_weights(ordered["chainage_m"].to_numpy(float), length_m)
+        surface_types = ordered["surface_type"].dropna().astype(str).unique()
+        if len(surface_types) != 1:
+            raise ValueError(f"링크 {segment_id}에 재질이 {len(surface_types)}개 존재합니다.")
         record: dict[str, object] = {
             "segment_id": int(segment_id),
             "length_m": round(length_m, 2),
             "sample_count": int(len(ordered)),
+            "surface_type": surface_types[0],
             "weather_status": "OBSERVED_ASOS_SAME_DATE",
             "model_confidence": "LOW",
         }
@@ -48,8 +52,12 @@ def aggregate_routes(samples: pd.DataFrame) -> pd.DataFrame:
             values = ordered[f"surface_temp_{hour:02d}_c"].to_numpy(float)
             record[f"surface_temp_{hour:02d}_c"] = round(float(np.average(values, weights=weights)), 2)
             record[f"surface_temp_{hour:02d}_max_c"] = round(float(values.max()), 2)
-            record[f"shade_ratio_{hour:02d}"] = round(
-                float(np.average(ordered[f"is_shaded_{hour:02d}"].astype(float), weights=weights)), 3
+            shade_values = ordered[f"is_shaded_{hour:02d}"]
+            known = shade_values.notna().to_numpy()
+            record[f"shade_ratio_{hour:02d}"] = (
+                round(float(np.average(shade_values.loc[known].astype(float), weights=weights[known])), 3)
+                if known.any()
+                else None
             )
         record["surface_temp_peak_c"] = max(record[f"surface_temp_{hour:02d}_c"] for hour in HOURS)
         rows.append(record)
@@ -70,7 +78,9 @@ def main() -> None:
 
     for hour in HOURS:
         current = weather.loc[hour]
-        shaded = samples[f"is_shaded_{hour:02d}"].astype(bool).to_numpy()
+        # D3 래스터 범위 밖/NoData는 '그늘'이 아니라 미관측이다. 열위험을
+        # 과소평가하지 않도록 계산에서는 양지(False)로 두고 원본 NULL은 보존한다.
+        shaded = samples[f"is_shaded_{hour:02d}"].fillna(False).astype(bool).to_numpy()
         solar = np.where(shaded, float(current["solar_w_m2"]) * transmission, float(current["solar_w_m2"]))
         temperature = solve_surface_temperature_array(
             albedo=samples["albedo"].to_numpy(float),

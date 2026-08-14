@@ -10,7 +10,7 @@ import pandas as pd
 
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
 D5_DIR = PIPELINE_ROOT / "data" / "processed" / "d5"
-DEFAULT_D4_GPKG = PIPELINE_ROOT / "data" / "interim" / "surface" / "d4_integrated_qa.gpkg"
+DEFAULT_D4_GPKG = PIPELINE_ROOT / "data" / "interim" / "surface" / "d4_integrated_qa_final.gpkg"
 DEFAULT_OUTPUT = PIPELINE_ROOT / "data" / "interim" / "thermal" / "d5_thermal_qa.gpkg"
 DEFAULT_REPORT = PIPELINE_ROOT / "reports" / "d5_integrated_qa.md"
 HOURS = (9, 12, 15, 18)
@@ -99,8 +99,9 @@ def validate_physics(samples: pd.DataFrame, calibration: pd.DataFrame) -> list[s
         temp = samples[f"surface_temp_{hour:02d}_c"]
         if not temp.between(-20, 80).all():
             warnings.append(f"{hour:02d}시 물리 범위(-20~80°C) 이탈")
-        shaded = samples.loc[samples[f"is_shaded_{hour:02d}"].astype(bool), f"surface_temp_{hour:02d}_c"]
-        sunlit = samples.loc[~samples[f"is_shaded_{hour:02d}"].astype(bool), f"surface_temp_{hour:02d}_c"]
+        shade_mask = samples[f"is_shaded_{hour:02d}"].fillna(False).astype(bool)
+        shaded = samples.loc[shade_mask, f"surface_temp_{hour:02d}_c"]
+        sunlit = samples.loc[~shade_mask, f"surface_temp_{hour:02d}_c"]
         if shaded.mean() >= sunlit.mean():
             warnings.append(f"{hour:02d}시 전체 평균에서 그늘이 양지보다 낮지 않음")
     if float(calibration["delta_residual_c"].abs().max()) > 10.0:
@@ -122,8 +123,9 @@ def write_report(samples: pd.DataFrame, routes: pd.DataFrame, calibration: pd.Da
     for hour in HOURS:
         field = f"surface_temp_{hour:02d}_c"
         values = samples[field]
-        shaded = samples.loc[samples[f"is_shaded_{hour:02d}"].astype(bool), field]
-        sunlit = samples.loc[~samples[f"is_shaded_{hour:02d}"].astype(bool), field]
+        shade_mask = samples[f"is_shaded_{hour:02d}"].fillna(False).astype(bool)
+        shaded = samples.loc[shade_mask, field]
+        sunlit = samples.loc[~shade_mask, field]
         lines.append(
             f"|{hour:02d}|{values.min():.2f}|{values.quantile(.05):.2f}|{values.median():.2f}|"
             f"{values.mean():.2f}|{values.quantile(.95):.2f}|{values.max():.2f}|"
@@ -153,10 +155,10 @@ def write_report(samples: pd.DataFrame, routes: pd.DataFrame, calibration: pd.Da
         "", "## QGIS에서 확인할 대표 반례", "",
         "1. 고온 후보: 15시 `HIGH_P99_15`가 건물 내부나 수면에 놓이지 않는지 확인",
         "2. 저온 후보: 09시 또는 18시 `LOW_P01`이 공원·그늘·낮은 SVF와 일치하는지 확인",
-        "3. 재질: asphalt/pavement/soil 분류가 배경지도와 현저히 다르지 않은지 확인",
+        "3. 재질: 현재 정책의 asphalt/pavement 분류가 배경지도와 현저히 다르지 않은지 확인",
         "4. 공원: 공원 경계 안과 인접 구간의 냉각이 최대 1.5°C 이내인지 확인",
         "5. 구조물 아래: 강제 건물그늘 구간이 양지로 계산되지 않았는지 확인", "",
-        "현재 산출물은 QGIS QA용이며 DB에는 반영하지 않았다.",
+        "이 산출물은 QGIS QA용이며 현재 DB 반영 상태는 `reports/d5_completion.md`에서 확인한다.",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
