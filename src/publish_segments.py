@@ -1,8 +1,15 @@
+import argparse
 from typing import Any
 
 import psycopg2
 
-from load_segments import build_db_config
+from db_config import (
+    add_replace_argument,
+    add_target_argument,
+    build_db_config,
+    describe_db_target,
+    require_dev_replace_permission,
+)
 
 
 EXPECTED_SEGMENT_COUNT = 7_766
@@ -11,6 +18,8 @@ EXPECTED_CLOSED_SEGMENT_COUNT = 9
 
 def publish_route_segments(
     db_config: dict[str, str | int],
+    target: str = "local",
+    allow_replace: bool = False,
 ) -> dict[str, Any]:
     """
     검증된 staging LINK를 최종 route_segment 베이스 데이터로 발행한다.
@@ -97,6 +106,9 @@ def publish_route_segments(
 
             cursor.execute("SELECT COUNT(*) FROM route_segment")
             previous_segment_count = int(cursor.fetchone()[0])
+            require_dev_replace_permission(
+                target, previous_segment_count, allow_replace, "route_segment"
+            )
 
             # sample point가 없음을 확인했으므로 기존 D2 베이스 데이터만 교체한다.
             cursor.execute("DELETE FROM route_segment")
@@ -221,13 +233,16 @@ def publish_route_segments(
 
 def main() -> None:
     """staging을 route_segment에 발행하고 품질검사 결과를 출력한다."""
-    db_config = build_db_config()
+    parser = argparse.ArgumentParser(description="검증된 도보망을 route_segment에 게시")
+    add_target_argument(parser)
+    add_replace_argument(parser)
+    args = parser.parse_args()
+    db_config = build_db_config(args.target)
 
-    print(
-        "[DB 연결] "
-        f"{db_config['host']}:{db_config['port']}/{db_config['dbname']}"
+    print(f"[DB 연결] {describe_db_target(args.target, db_config)}")
+    statistics = publish_route_segments(
+        db_config, target=args.target, allow_replace=args.allow_replace
     )
-    statistics = publish_route_segments(db_config)
 
     print()
     print("[route_segment 발행 결과]")

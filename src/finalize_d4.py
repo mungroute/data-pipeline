@@ -20,7 +20,7 @@ from d4_common import (
     SURFACE_PROPERTIES,
     ensure_expected_count,
 )
-from load_segments import build_db_config
+from db_config import add_target_argument, build_db_config, describe_db_target
 
 
 DEFAULT_SAMPLE_SURFACE = D4_OUTPUT_DIR / "d4_sample_surface.csv"
@@ -42,6 +42,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--apply", action="store_true", help="모든 QA 통과 후 한 트랜잭션으로 DB에 반영")
+    add_target_argument(parser)
     return parser.parse_args()
 
 
@@ -52,9 +53,11 @@ def load_csv(path: Path, label: str) -> pd.DataFrame:
     return pd.read_csv(path, encoding="utf-8-sig")
 
 
-def fetch_existing() -> tuple[pd.DataFrame, gpd.GeoDataFrame]:
+def fetch_existing(
+    db_config: dict[str, str | int],
+) -> tuple[pd.DataFrame, gpd.GeoDataFrame]:
     """SVF·그림자와 QA 도형을 DB에서 읽기 전용으로 가져온다."""
-    with psycopg2.connect(**build_db_config()) as connection:
+    with psycopg2.connect(**db_config) as connection:
         sample_sql = """
             SELECT sample_id, segment_id, seq, svf,
                    is_shaded_09, is_shaded_12, is_shaded_15, is_shaded_18,
@@ -94,13 +97,18 @@ def temperature_grade(surface_quality: str, current_shade_grade: str, park_dista
     return {"A": "A", "B": "B", "C": "C", "D": "D"}.get(surface_quality, "D")
 
 
-def build_integrated() -> tuple[pd.DataFrame, gpd.GeoDataFrame, dict[str, float]]:
+def build_integrated(
+    db_config: dict[str, str | int] | None = None,
+) -> tuple[pd.DataFrame, gpd.GeoDataFrame, dict[str, float]]:
     """D3/D4 결과를 ID로 결합하고 대체값·등급·민감도 지표를 계산한다."""
+    if db_config is None:
+        # 기존 계산 스크립트 호환성과 local 기본 정책을 유지한다.
+        db_config = build_db_config("local")
     sample_surface = load_csv(DEFAULT_SAMPLE_SURFACE, "샘플 재질")
     route_surface = load_csv(DEFAULT_ROUTE_SURFACE, "링크 재질")
     sample_park = load_csv(DEFAULT_SAMPLE_PARK, "샘플 공원")
     route_park = load_csv(DEFAULT_ROUTE_PARK, "링크 공원")
-    existing_samples, existing_routes = fetch_existing()
+    existing_samples, existing_routes = fetch_existing(db_config)
 
     sample_columns = [
         "sample_id", "surface_type", "albedo", "emissivity", "ground_flux_ratio",
@@ -270,7 +278,11 @@ def write_report(samples: pd.DataFrame, routes: pd.DataFrame, sensitivity: dict[
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def apply_to_database(samples: pd.DataFrame, routes: pd.DataFrame) -> dict[str, object]:
+def apply_to_database(
+    samples: pd.DataFrame,
+    routes: pd.DataFrame,
+    db_config: dict[str, str | int],
+) -> dict[str, object]:
     """검증 결과를 잠금과 사후 검사를 포함한 단일 트랜잭션으로 반영한다."""
     sample_rows = [
         (int(row.sample_id), round(float(row.svf_effective), 3), round(float(row.albedo), 3),
@@ -284,7 +296,7 @@ def apply_to_database(samples: pd.DataFrame, routes: pd.DataFrame) -> dict[str, 
          str(row.shade_grade_new), str(row.temp_grade_new))
         for row in routes.itertuples(index=False)
     ]
-    with psycopg2.connect(**build_db_config()) as connection:
+    with psycopg2.connect(**db_config) as connection:
         with connection.cursor() as cursor:
             cursor.execute("LOCK TABLE segment_sample_point, route_segment IN SHARE ROW EXCLUSIVE MODE")
             cursor.execute(
@@ -437,14 +449,16 @@ def main() -> None:
     DEFAULT_SAMPLE_PARK = args.sample_park.resolve()
     DEFAULT_ROUTE_PARK = args.route_park.resolve()
 
-    samples, routes, sensitivity = build_integrated()
+    db_config = build_db_config(args.target)
+    print(f"[DB 연결] {describe_db_target(args.target, db_config)}")
+    samples, routes, sensitivity = build_integrated(db_config)
     validate_integrated(samples, routes)
     write_qa(samples, routes, args.qa_gpkg.resolve(), args.overwrite)
     write_report(samples, routes, sensitivity, args.report.resolve(), applied=False)
     print(f"[통합 QA 통과] 샘플 {len(samples):,}, 링크 {len(routes):,}")
     print(f"[QA] {args.qa_gpkg.resolve()}")
     if args.apply:
-        checks = apply_to_database(samples, routes)
+        checks = apply_to_database(samples, routes, db_config)
         write_report(samples, routes, sensitivity, args.report.resolve(), applied=True)
         print(f"[DB 반영 완료] {checks}")
     else:

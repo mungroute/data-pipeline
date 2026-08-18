@@ -1,15 +1,21 @@
+import argparse
 import csv
-import os
 from pathlib import Path
 
 import geopandas as gpd
 import psycopg2
 from psycopg2.extras import execute_values
 
+from db_config import (
+    add_replace_argument,
+    add_target_argument,
+    build_db_config,
+    describe_db_target,
+    require_dev_replace_permission,
+)
+
 
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
-PROJECT_ROOT = PIPELINE_ROOT.parent
-BACKEND_ENV_PATH = PROJECT_ROOT / "backend" / ".env"
 SNAPPED_NETWORK_PATH = (
     PIPELINE_ROOT
     / "data"
@@ -22,61 +28,6 @@ EXCLUSION_PATH = PIPELINE_ROOT / "config" / "network_exclusions.csv"
 EXPECTED_INPUT_LINK_COUNT = 7_771
 EXPECTED_ROUTABLE_LINK_COUNT = 7_766
 ACTIVE_EXCLUSION_STATUSES = {"EXCLUDE", "EXCLUDE_TEMPORARY"}
-
-
-def read_env_file(path: Path) -> dict[str, str]:
-    """간단한 KEY=VALUE 형식의 backend .env를 읽어 사전으로 반환한다."""
-    if not path.exists():
-        raise FileNotFoundError(f"DB 환경설정 파일이 없습니다: {path}")
-
-    settings: dict[str, str] = {}
-
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-
-        key, value = line.split("=", 1)
-        settings[key.strip()] = value.strip().strip('"').strip("'")
-
-    return settings
-
-
-def build_db_config() -> dict[str, str | int]:
-    """환경변수를 우선하고, 없으면 backend .env에서 DB 설정을 가져온다."""
-    env_settings = read_env_file(BACKEND_ENV_PATH)
-
-    config: dict[str, str | int] = {
-        "host": os.getenv("POSTGRES_HOST", "localhost"),
-        "port": int(
-            os.getenv(
-                "POSTGRES_PORT",
-                env_settings.get("POSTGRES_PORT", "15432"),
-            )
-        ),
-        "dbname": os.getenv(
-            "POSTGRES_DB",
-            env_settings.get("POSTGRES_DB", ""),
-        ),
-        "user": os.getenv(
-            "POSTGRES_USER",
-            env_settings.get("POSTGRES_USER", ""),
-        ),
-        "password": os.getenv(
-            "POSTGRES_PASSWORD",
-            env_settings.get("POSTGRES_PASSWORD", ""),
-        ),
-    }
-
-    missing = [
-        key
-        for key in ("dbname", "user", "password")
-        if not config[key]
-    ]
-    if missing:
-        raise ValueError(f"DB 설정값이 없습니다: {', '.join(missing)}")
-
-    return config
 
 
 def load_and_validate_snapped_links() -> gpd.GeoDataFrame:
@@ -202,6 +153,8 @@ def make_insert_rows(links: gpd.GeoDataFrame) -> list[tuple]:
 def load_staging_table(
     links: gpd.GeoDataFrame,
     db_config: dict[str, str | int],
+    target: str = "local",
+    allow_replace: bool = False,
 ) -> dict[str, int | float]:
     """
     스냅 LINK를 route_segment_staging에 트랜잭션 단위로 다시 적재한다.
@@ -221,6 +174,12 @@ def load_staging_table(
                     "route_segment_staging 테이블이 없습니다. "
                     "Flyway V4 적용 상태를 확인하세요."
                 )
+
+            cursor.execute("SELECT COUNT(*) FROM route_segment_staging")
+            existing_rows = int(cursor.fetchone()[0])
+            require_dev_replace_permission(
+                target, existing_rows, allow_replace, "route_segment_staging"
+            )
 
             # staging은 언제든 같은 processed 파일로 재생성할 수 있는 파생 데이터다.
             cursor.execute("TRUNCATE TABLE route_segment_staging")
@@ -314,9 +273,13 @@ def load_staging_table(
 
 def main() -> None:
     """D2 processed 도보망을 DB staging에 적재하고 결과를 출력한다."""
+    parser = argparse.ArgumentParser(description="D2 도보망 staging 적재")
+    add_target_argument(parser)
+    add_replace_argument(parser)
+    args = parser.parse_args()
     input_links = load_and_validate_snapped_links()
     links, exclusions = apply_network_exclusions(input_links)
-    db_config = build_db_config()
+    db_config = build_db_config(args.target)
 
     print(f"[입력 파일] {SNAPPED_NETWORK_PATH}")
     print(f"[입력 레이어] {SNAPPED_LAYER}")
@@ -325,12 +288,11 @@ def main() -> None:
     for segment_id, exclusion_code in sorted(exclusions.items()):
         print(f"  {segment_id}: {exclusion_code}")
     print(f"[routing 대상 LINK] {len(links):,}")
-    print(
-        "[DB 연결] "
-        f"{db_config['host']}:{db_config['port']}/{db_config['dbname']}"
-    )
+    print(f"[DB 연결] {describe_db_target(args.target, db_config)}")
 
-    statistics = load_staging_table(links, db_config)
+    statistics = load_staging_table(
+        links, db_config, target=args.target, allow_replace=args.allow_replace
+    )
 
     print()
     print("[route_segment_staging 적재 결과]")

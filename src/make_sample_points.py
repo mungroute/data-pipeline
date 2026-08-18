@@ -1,9 +1,16 @@
+import argparse
 from pathlib import Path
 from typing import Any
 
 import psycopg2
 
-from load_segments import build_db_config
+from db_config import (
+    add_replace_argument,
+    add_target_argument,
+    build_db_config,
+    describe_db_target,
+    require_dev_replace_permission,
+)
 
 
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +22,8 @@ EXPECTED_SAMPLE_COUNT = 31_167
 
 def rebuild_sample_points(
     db_config: dict[str, str | int],
+    target: str = "local",
+    allow_replace: bool = False,
 ) -> dict[str, Any]:
     """route_segment를 약 10m 구간으로 나누고 각 구간 중심점을 적재한다.
 
@@ -72,6 +81,10 @@ def rebuild_sample_points(
                     "기존 D3/D4 분석값을 보호하기 위해 분할점 재생성을 중단합니다: "
                     f"분석값 보유 sample={enriched_count:,}"
                 )
+
+            require_dev_replace_permission(
+                target, existing_count, allow_replace, "segment_sample_point"
+            )
 
             cursor.execute(
                 "TRUNCATE TABLE segment_sample_point RESTART IDENTITY"
@@ -265,12 +278,15 @@ def write_report(statistics: dict[str, Any]) -> None:
 
 def main() -> None:
     """10m 공통 분할점을 재생성하고 DB 및 보고서 품질검사를 수행한다."""
-    db_config = build_db_config()
-    print(
-        "[DB 연결] "
-        f"{db_config['host']}:{db_config['port']}/{db_config['dbname']}"
+    parser = argparse.ArgumentParser(description="D2 공통 segment sample point 생성")
+    add_target_argument(parser)
+    add_replace_argument(parser)
+    args = parser.parse_args()
+    db_config = build_db_config(args.target)
+    print(f"[DB 연결] {describe_db_target(args.target, db_config)}")
+    statistics = rebuild_sample_points(
+        db_config, target=args.target, allow_replace=args.allow_replace
     )
-    statistics = rebuild_sample_points(db_config)
     write_report(statistics)
 
     print("\n[segment_sample_point 생성 결과]")

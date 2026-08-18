@@ -18,7 +18,7 @@ from calc_shadow import (
     assert_same_grid,
     open_raster,
 )
-from load_segments import build_db_config
+from db_config import add_target_argument, build_db_config, describe_db_target
 
 
 gdal.UseExceptions()
@@ -100,6 +100,7 @@ def parse_arguments() -> argparse.Namespace:
         action="store_true",
         help="검증된 결과를 segment_sample_point와 route_segment에 반영합니다.",
     )
+    add_target_argument(parser)
     return parser.parse_args()
 
 
@@ -693,7 +694,8 @@ def main() -> None:
         raise ValueError("--directions는 4 이상이어야 합니다.")
     grid = load_raster_grid(arguments.dtm, arguments.dsm)
     decisions = load_decisions(arguments.decisions)
-    db_config = build_db_config()
+    db_config = build_db_config(arguments.target)
+    print(f"[DB 연결] {describe_db_target(arguments.target, db_config)}")
     samples = fetch_samples(db_config)
     locations, null_results = resolve_sample_locations(
         samples, grid, decisions, arguments.maximum_nearest_ground_m

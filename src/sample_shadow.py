@@ -27,7 +27,7 @@ from calc_shadow_sources import (
     SOURCE_LABELS,
     source_output_path,
 )
-from load_segments import build_db_config
+from db_config import add_target_argument, build_db_config, describe_db_target
 
 
 gdal.UseExceptions()
@@ -111,6 +111,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT_PATH)
     parser.add_argument("--maximum-nearest-ground-m", type=float, default=30.0)
     parser.add_argument("--apply", action="store_true", help="검증된 staging 결과를 한 트랜잭션으로 DB에 반영합니다.")
+    add_target_argument(parser)
     return parser.parse_args()
 
 
@@ -550,7 +551,8 @@ def main() -> None:
     args = parse_arguments()
     if args.maximum_nearest_ground_m <= 0:
         raise ValueError("--maximum-nearest-ground-m은 0보다 커야 합니다.")
-    db_config = build_db_config()
+    db_config = build_db_config(args.target)
+    print(f"[DB 연결] {describe_db_target(args.target, db_config)}")
     rasters = load_rasters(args.source_dir, args.building_height)
     decisions = load_decisions(args.decisions)
     samples = fetch_samples(db_config)

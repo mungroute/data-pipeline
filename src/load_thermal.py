@@ -11,7 +11,7 @@ import psycopg2
 from psycopg2.extras import execute_values
 
 from d4_common import EXPECTED_SEGMENT_COUNT
-from load_segments import build_db_config
+from db_config import add_target_argument, build_db_config, describe_db_target
 
 
 PIPELINE_ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +34,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
     parser.add_argument("--apply", action="store_true", help="검증 통과 후 DB에 실제 반영")
+    add_target_argument(parser)
     return parser.parse_args()
 
 
@@ -457,9 +458,9 @@ def main() -> None:
     if not args.input.is_file():
         raise FileNotFoundError(f"D5 링크 온도 CSV가 없습니다: {args.input}")
     frame = validate_thermal_frame(pd.read_csv(args.input, encoding="utf-8-sig"))
-    db_config = build_db_config()
+    db_config = build_db_config(args.target)
     print(f"[사전 검증 통과] D5 링크 {len(frame):,}행")
-    print(f"[DB 연결] {db_config['host']}:{db_config['port']}/{db_config['dbname']}")
+    print(f"[DB 연결] {describe_db_target(args.target, db_config)}")
     if not args.apply:
         print("[안내] dry-run입니다. 실제 반영은 --apply를 사용하세요.")
         return

@@ -29,6 +29,7 @@ data/processed/*
 
 # Env / secrets
 .env
+.env.dev
 
 # OS / editor
 .DS_Store
