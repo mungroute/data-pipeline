@@ -20,7 +20,7 @@ from d4_common import (
     SURFACE_PROPERTIES,
     ensure_expected_count,
 )
-from load_segments import build_db_config
+from db_config import add_target_argument, build_db_config, describe_db_target
 
 
 DEFAULT_SAMPLE_SURFACE = D4_OUTPUT_DIR / "d4_sample_surface.csv"
@@ -42,6 +42,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--apply", action="store_true", help="모든 QA 통과 후 한 트랜잭션으로 DB에 반영")
+    add_target_argument(parser)
     return parser.parse_args()
 
 
@@ -52,9 +53,11 @@ def load_csv(path: Path, label: str) -> pd.DataFrame:
     return pd.read_csv(path, encoding="utf-8-sig")
 
 
-def fetch_existing() -> tuple[pd.DataFrame, gpd.GeoDataFrame]:
+def fetch_existing(
+    db_config: dict[str, str | int],
+) -> tuple[pd.DataFrame, gpd.GeoDataFrame]:
     """SVF·그림자와 QA 도형을 DB에서 읽기 전용으로 가져온다."""
-    with psycopg2.connect(**build_db_config()) as connection:
+    with psycopg2.connect(**db_config) as connection:
         sample_sql = """
             SELECT sample_id, segment_id, seq, svf,
                    is_shaded_09, is_shaded_12, is_shaded_15, is_shaded_18,
@@ -94,13 +97,18 @@ def temperature_grade(surface_quality: str, current_shade_grade: str, park_dista
     return {"A": "A", "B": "B", "C": "C", "D": "D"}.get(surface_quality, "D")
 
 
-def build_integrated() -> tuple[pd.DataFrame, gpd.GeoDataFrame, dict[str, float]]:
+def build_integrated(
+    db_config: dict[str, str | int] | None = None,
+) -> tuple[pd.DataFrame, gpd.GeoDataFrame, dict[str, float]]:
     """D3/D4 결과를 ID로 결합하고 대체값·등급·민감도 지표를 계산한다."""
+    if db_config is None:
+        # 기존 계산 스크립트 호환성과 local 기본 정책을 유지한다.
+        db_config = build_db_config("local")
     sample_surface = load_csv(DEFAULT_SAMPLE_SURFACE, "샘플 재질")
     route_surface = load_csv(DEFAULT_ROUTE_SURFACE, "링크 재질")
     sample_park = load_csv(DEFAULT_SAMPLE_PARK, "샘플 공원")
     route_park = load_csv(DEFAULT_ROUTE_PARK, "링크 공원")
-    existing_samples, existing_routes = fetch_existing()
+    existing_samples, existing_routes = fetch_existing(db_config)
 
     sample_columns = [
         "sample_id", "surface_type", "albedo", "emissivity", "ground_flux_ratio",
@@ -135,8 +143,11 @@ def build_integrated() -> tuple[pd.DataFrame, gpd.GeoDataFrame, dict[str, float]
         ), axis=1,
     )
 
-    # 토지피복 154 등 도시피복의 재질 불확실성이 결과에 주는 범위를 계산한다.
-    ambiguous = sample_surface["classification_basis"] == "LANDCOVER_LINKTYPE"
+    # 토지피복도는 실제 발밑 재질도가 아니므로 도시피복뿐 아니라
+    # 자연피복 경계와 겹친 링크까지 asphalt/pavement 가정 민감도에 포함한다.
+    ambiguous = sample_surface["classification_basis"].isin(
+        ["LANDCOVER_LINKTYPE", "LANDCOVER_CONTEXT_LINKTYPE"]
+    )
     all_asphalt = sample_surface.copy()
     all_pavement = sample_surface.copy()
     for frame, material in ((all_asphalt, "asphalt"), (all_pavement, "pavement")):
@@ -227,7 +238,7 @@ def write_report(samples: pd.DataFrame, routes: pd.DataFrame, sensitivity: dict[
     temp_distribution = routes["temp_grade_new"].value_counts().to_dict()
     lines = [
         "# D4-3~D4-6 통합 QA 및 계산식 재검토", "", "## 완료 범위", "",
-        "- D4-3 환경부 세분류 + 보행 링크 유형 기반 노면 재질 분류",
+        "- D4-3 토지피복은 주변 맥락으로만 사용하고 보행 링크 유형으로 기본 노면 재질 분류",
         "- D4-4 샘플 물성 부여 및 링크 길이가중 집계",
         "- D4-5 UQT2xx 공원 폴리곤까지 거리 계산",
         "- D4-6 품질등급, 전체 커버리지, 민감도·반례 검증", "",
@@ -248,11 +259,11 @@ def write_report(samples: pd.DataFrame, routes: pd.DataFrame, sensitivity: dict[
         "4. **물성값**: 명세 기본값은 D5용 사전값이다. 현장 적외선 실측으로 직접 알베도를 추정할 수는 없으며, D5에서 재질별 온도 오차를 이용해 민감도·보정을 수행한다.",
         "5. **지중열비**: 고정비는 시간·수분·재질 상태를 생략한 근사다. FAO도 G/Rn 관계가 시간과 토양 상태에 민감한 근사임을 명시하므로 D5 검증 대상이다.", "",
         "## 재질 가정 민감도", "",
-        f"- 도시/도로 피복의 보완 분류 샘플: {int(sensitivity['ambiguous_samples']):,}",
+        f"- 토지피복과 링크 유형을 결합한 불확실 분류 샘플: {int(sensitivity['ambiguous_samples']):,}",
         f"- 현재 링크 평균 알베도: {sensitivity['baseline_mean_albedo']:.3f}",
         f"- 전부 asphalt 가정: {sensitivity['all_asphalt_mean_albedo']:.3f}",
         f"- 전부 pavement 가정: {sensitivity['all_pavement_mean_albedo']:.3f}",
-        "- 이 범위가 큰 것은 원본이 재질도가 아니라 토지이용도이기 때문이다. 현재는 차량 통행 비트와 중구 보도통계의 포장 구성을 결합한 값을 채택한다.", "",
+        "- 원본은 실제 노면 재질도가 아니므로 차량 통행 비트로 asphalt/pavement를 추정한다. grass/soil은 현장 확인 수동 교정만 허용한다.", "",
         "## 문헌 대조", "",
         "- 미국 EPA는 새 아스팔트 반사율을 대략 0.05~0.10, 새 콘크리트를 0.35~0.40으로 제시한다. 명세의 0.12/0.28은 노후·오염·블록 차이를 감안한 중간 사전값으로 보고 실측 보정한다.",
         "- USGS Spectral Library는 토양·식생·아스팔트·콘크리트의 실측 분광 자료를 제공하며 단일 상수보다 재료별 변동이 존재함을 전제로 한다.",
@@ -267,7 +278,11 @@ def write_report(samples: pd.DataFrame, routes: pd.DataFrame, sensitivity: dict[
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def apply_to_database(samples: pd.DataFrame, routes: pd.DataFrame) -> dict[str, object]:
+def apply_to_database(
+    samples: pd.DataFrame,
+    routes: pd.DataFrame,
+    db_config: dict[str, str | int],
+) -> dict[str, object]:
     """검증 결과를 잠금과 사후 검사를 포함한 단일 트랜잭션으로 반영한다."""
     sample_rows = [
         (int(row.sample_id), round(float(row.svf_effective), 3), round(float(row.albedo), 3),
@@ -281,7 +296,7 @@ def apply_to_database(samples: pd.DataFrame, routes: pd.DataFrame) -> dict[str, 
          str(row.shade_grade_new), str(row.temp_grade_new))
         for row in routes.itertuples(index=False)
     ]
-    with psycopg2.connect(**build_db_config()) as connection:
+    with psycopg2.connect(**db_config) as connection:
         with connection.cursor() as cursor:
             cursor.execute("LOCK TABLE segment_sample_point, route_segment IN SHARE ROW EXCLUSIVE MODE")
             cursor.execute(
@@ -434,14 +449,16 @@ def main() -> None:
     DEFAULT_SAMPLE_PARK = args.sample_park.resolve()
     DEFAULT_ROUTE_PARK = args.route_park.resolve()
 
-    samples, routes, sensitivity = build_integrated()
+    db_config = build_db_config(args.target)
+    print(f"[DB 연결] {describe_db_target(args.target, db_config)}")
+    samples, routes, sensitivity = build_integrated(db_config)
     validate_integrated(samples, routes)
     write_qa(samples, routes, args.qa_gpkg.resolve(), args.overwrite)
     write_report(samples, routes, sensitivity, args.report.resolve(), applied=False)
     print(f"[통합 QA 통과] 샘플 {len(samples):,}, 링크 {len(routes):,}")
     print(f"[QA] {args.qa_gpkg.resolve()}")
     if args.apply:
-        checks = apply_to_database(samples, routes)
+        checks = apply_to_database(samples, routes, db_config)
         write_report(samples, routes, sensitivity, args.report.resolve(), applied=True)
         print(f"[DB 반영 완료] {checks}")
     else:

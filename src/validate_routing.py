@@ -1,8 +1,9 @@
+import argparse
 from typing import Any
 
 import psycopg2
 
-from load_segments import build_db_config
+from db_config import add_target_argument, build_db_config, describe_db_target
 
 
 EDGE_SQL = """
@@ -39,11 +40,7 @@ def validate_routing_graph(
         with connection.cursor() as cursor:
             cursor.execute("SELECT pgr_version()")
             pgrouting_version = cursor.fetchone()[0]
-            if parse_version(pgrouting_version) < (3, 8, 0):
-                raise RuntimeError(
-                    "공식 pgr_degree(text)를 사용하려면 pgRouting 3.8+가 "
-                    f"필요합니다: 현재 {pgrouting_version}"
-                )
+            supports_pgr_degree = parse_version(pgrouting_version) >= (3, 8, 0)
 
             cursor.execute(
                 """
@@ -73,14 +70,40 @@ def validate_routing_graph(
                 """,
                 (EDGE_SQL,),
             )
-            cursor.execute(
-                """
-                CREATE TEMP TABLE qa_degrees ON COMMIT DROP AS
-                SELECT *
-                FROM pgr_degree(%s)
-                """,
-                (EDGE_SQL,),
-            )
+            if supports_pgr_degree:
+                cursor.execute(
+                    """
+                    CREATE TEMP TABLE qa_degrees ON COMMIT DROP AS
+                    SELECT node, degree
+                    FROM pgr_degree(%s)
+                    """,
+                    (EDGE_SQL,),
+                )
+                degree_method = "pgr_degree"
+            else:
+                # Supabase pgRouting 3.4에는 pgr_degree(text)가 없으므로
+                # 같은 무방향 degree를 source/target 출현 횟수로 계산한다.
+                # self-loop는 양 끝점으로 두 번 출현해 degree 2로 집계된다.
+                cursor.execute(
+                    """
+                    CREATE TEMP TABLE qa_degrees ON COMMIT DROP AS
+                    WITH endpoint_counts AS (
+                        SELECT node, COUNT(*)::BIGINT AS degree
+                        FROM (
+                            SELECT source AS node FROM route_segment
+                            UNION ALL
+                            SELECT target AS node FROM route_segment
+                        ) AS endpoints
+                        GROUP BY node
+                    )
+                    SELECT vertex.vertex_id AS node,
+                           COALESCE(endpoint.degree, 0)::BIGINT AS degree
+                    FROM route_vertex AS vertex
+                    LEFT JOIN endpoint_counts AS endpoint
+                      ON endpoint.node = vertex.vertex_id
+                    """
+                )
+                degree_method = "source_target_fallback"
 
             cursor.execute(
                 """
@@ -217,6 +240,7 @@ def validate_routing_graph(
 
             statistics: dict[str, Any] = {
                 "pgrouting_version": pgrouting_version,
+                "degree_method": degree_method,
                 "edge_count": edge_count,
                 "vertex_count": vertex_count,
                 "component_count": component_count,
@@ -273,17 +297,18 @@ def validate_routing_graph(
 
 def main() -> None:
     """D2 routing graph의 품질 지표와 실제 경로 검증 결과를 출력한다."""
-    db_config = build_db_config()
+    parser = argparse.ArgumentParser(description="pgRouting graph 읽기 전용 검증")
+    add_target_argument(parser)
+    args = parser.parse_args()
+    db_config = build_db_config(args.target)
 
-    print(
-        "[DB 연결] "
-        f"{db_config['host']}:{db_config['port']}/{db_config['dbname']}"
-    )
+    print(f"[DB 연결] {describe_db_target(args.target, db_config)}")
     statistics = validate_routing_graph(db_config)
 
     print()
     print("[routing graph 품질검사]")
     print(f"  pgRouting: {statistics['pgrouting_version']}")
+    print(f"  degree 계산: {statistics['degree_method']}")
     print(f"  LINK: {statistics['edge_count']:,}")
     print(f"  vertex: {statistics['vertex_count']:,}")
     print(f"  connected component: {statistics['component_count']:,}")

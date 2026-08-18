@@ -11,6 +11,9 @@ __pycache__/
 venv/
 env/
 
+# Node dependencies
+node_modules/
+
 # Notebook / test cache
 .ipynb_checkpoints/
 .pytest_cache/
@@ -26,6 +29,7 @@ data/processed/*
 
 # Env / secrets
 .env
+.env.dev
 
 # OS / editor
 .DS_Store

@@ -1,8 +1,15 @@
+import argparse
 from typing import Any
 
 import psycopg2
 
-from load_segments import build_db_config
+from db_config import (
+    add_replace_argument,
+    add_target_argument,
+    build_db_config,
+    describe_db_target,
+    require_dev_replace_permission,
+)
 
 
 EXPECTED_EDGE_COUNT = 7_766
@@ -11,6 +18,8 @@ EXPECTED_CLOSED_EDGE_COUNT = 9
 
 def rebuild_route_topology(
     db_config: dict[str, str | int],
+    target: str = "local",
+    allow_replace: bool = False,
 ) -> dict[str, Any]:
     """
     staging geometry에서 route_vertex와 source/target을 다시 구성한다.
@@ -44,6 +53,12 @@ def rebuild_route_topology(
                     f"staging LINK 수가 다릅니다: {staging_count:,} / "
                     f"예상 {EXPECTED_EDGE_COUNT:,}"
                 )
+
+            cursor.execute("SELECT COUNT(*) FROM route_vertex")
+            existing_vertex_count = int(cursor.fetchone()[0])
+            require_dev_replace_permission(
+                target, existing_vertex_count, allow_replace, "route_vertex"
+            )
 
             # 이전 topology 결과가 남아 있어도 같은 staging으로 재생성한다.
             cursor.execute(
@@ -202,13 +217,16 @@ def rebuild_route_topology(
 
 def main() -> None:
     """route_vertex 생성과 staging source/target 연결 결과를 출력한다."""
-    db_config = build_db_config()
+    parser = argparse.ArgumentParser(description="D2 pgRouting topology 생성")
+    add_target_argument(parser)
+    add_replace_argument(parser)
+    args = parser.parse_args()
+    db_config = build_db_config(args.target)
 
-    print(
-        "[DB 연결] "
-        f"{db_config['host']}:{db_config['port']}/{db_config['dbname']}"
+    print(f"[DB 연결] {describe_db_target(args.target, db_config)}")
+    statistics = rebuild_route_topology(
+        db_config, target=args.target, allow_replace=args.allow_replace
     )
-    statistics = rebuild_route_topology(db_config)
 
     print()
     print("[route topology 생성 결과]")

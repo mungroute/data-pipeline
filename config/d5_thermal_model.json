@@ -1,0 +1,24 @@
+{
+  "model_version": "D5-BASELINE-1",
+  "measurement_date": "2026-08-11",
+  "weather_observed_date": "2026-08-11",
+  "weather_station_id": 108,
+  "weather_station_name": "서울",
+  "weather_status": "OBSERVED_ASOS_SAME_DATE",
+  "shade_solar_transmission": 0.4605,
+  "sky_offset_c": 10.0,
+  "park_cooling_max_c": 1.5,
+  "park_cooling_distance_m": 200.0,
+  "calibration_rows_actual": 12,
+  "calibration_rows_synthetic": 0,
+  "delta_mae_c": 3.949,
+  "delta_rmse_c": 5.408,
+  "absolute_rmse_c_exploratory": 6.169,
+  "confidence": "LOW",
+  "limitations": [
+    "서울 ASOS 108번은 실측일과 같지만 회사 주변 실측 지점의 현장 미기후와 차이가 있을 수 있음",
+    "서비스 대상지 밖의 단일 보정 지점이며 표본은 12쌍뿐임",
+    "일부 반복 측정쌍의 분산이 커 품질 가중치를 적용함",
+    "모의 2차 데이터는 보정·검증에서 제외"
+  ]
+}
